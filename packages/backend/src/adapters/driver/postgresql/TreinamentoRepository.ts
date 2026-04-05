@@ -1,12 +1,15 @@
 import { Pool } from 'pg';
-import { ITreinamentoRepository } from '../../../core/ports/out/ITreinamentoRepository';
+import { TrainingRow } from '@core/domain/training/TrainingRow';
+import { ITreinamentoRepository } from '@core/ports/out/ITreinamentoRepository';
+import { RawTrainingRow, TrainingRowMapper } from './TrainingRowMapper';
+
 export class TreinamentoRepository implements ITreinamentoRepository {
 
-     constructor(private readonly pool: Pool) {}
+    constructor(private readonly pool: Pool) {}
 
-    async getRawTrainingData(): Promise<any[]> {
+    async getRawTrainingData(): Promise<TrainingRow[]> {
         const query = `
-            SELECT 
+            SELECT
             u.anos_experiencia,
             array_agg(distinct hu.habilidade) as habilidades_usuario,
             v.nivel_senioridade,
@@ -17,10 +20,10 @@ export class TreinamentoRepository implements ITreinamentoRepository {
             CROSS JOIN vagas v
             JOIN habilidades_vaga hv on (hv.vaga_id = v.id)
             LEFT JOIN candidaturas c on (c.usuario_id = u.id and c.vaga_id = v.id)
-            GROUP BY u.id, v.id, v.nivel_senioridade 
-        `
+            GROUP BY u.id, v.id, v.nivel_senioridade
+        `;
         const res = await this.pool.query(query);
-        return res.rows;     
+        return (res.rows as RawTrainingRow[]).map(TrainingRowMapper.toModel);
     }
 
 }
