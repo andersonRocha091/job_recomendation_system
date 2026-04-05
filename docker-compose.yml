@@ -1,0 +1,24 @@
+services:
+ db:
+  image: pgvector/pgvector:pg16
+  container_name: job_recommendation_db
+  restart: unless-stopped
+  environment:
+    POSTGRES_DB: job_recommendation
+    POSTGRES_USER: user
+    POSTGRES_PASSWORD: user
+  ports:
+    - "5432:5432"
+  volumes:
+    - pgdata:/var/lib/postgresql/data
+    - type: bind
+      source: ./init
+      target: /docker-entrypoint-initdb.d
+  healthcheck:
+    test: ["CMD-SHELL","pg_isready -U user -d job_recommendation"]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+
+volumes:
+  pgdata:

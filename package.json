@@ -1,0 +1,23 @@
+{
+    "name": "ecommerce-recomendations-monorepo",
+    "version": "1.0.0",
+    "description": "E-commerce recommendation system — monorepo (frontend + backend)",
+    "private": true,
+    "workspaces": [
+        "packages/frontend",
+        "packages/backend"
+    ],
+    "scripts": {
+        "start": "concurrently --names \"frontend,backend\" --prefix-colors \"cyan,magenta\" \"npm run start --workspace=packages/frontend\" \"npm run start --workspace=packages/backend\"",
+        "start:frontend": "npm run start --workspace=packages/frontend",
+        "start:backend": "npm run start --workspace=packages/backend",
+        "dev": "concurrently --names \"frontend,backend\" --prefix-colors \"cyan,magenta\" \"npm run start --workspace=packages/frontend\" \"npm run dev --workspace=packages/backend\"",
+        "test": "npm run test --workspaces --if-present",
+        "test:frontend": "npm run test --workspace=packages/frontend",
+        "test:backend": "npm run test --workspace=packages/backend",
+        "install:all": "npm install"
+    },
+    "devDependencies": {
+        "concurrently": "^9.1.2"
+    }
+}

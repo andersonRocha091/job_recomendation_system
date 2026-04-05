@@ -1,0 +1,20 @@
+{
+    "name": "@ecommerce-recomendations/frontend",
+    "version": "1.0.0",
+    "description": "E-commerce recommendation system — frontend SPA with TensorFlow.js",
+    "main": "index.js",
+    "type": "module",
+    "scripts": {
+        "start": "browser-sync -w . --server --files 'index.html, data/*.json, src/**/*.js' --port 3000",
+        "test": "echo \"No frontend tests configured yet\" && exit 0"
+    },
+    "keywords": [
+        "ecommerce",
+        "tensorflow",
+        "recommendation",
+        "javascript"
+    ],
+    "devDependencies": {
+        "browser-sync": "^3.0.4"
+    }
+}
