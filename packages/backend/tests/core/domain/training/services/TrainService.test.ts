@@ -1,8 +1,25 @@
+import * as fs from 'fs';
 import * as tf from '@tensorflow/tfjs-node';
+
+// Substitui as funções de I/O do fs para que runTraining() não toque o sistema de arquivos.
+// existsSync passa para a implementação real por padrão — TF.js usa fs.existsSync para
+// localizar seus bindings nativos em tempo de import; mockReturn(false) é aplicado
+// apenas dentro do describe('runTraining') e restaurado no afterEach.
+jest.mock('fs', () => {
+    const realFs = jest.requireActual<typeof import('fs')>('fs');
+    return {
+        ...realFs,
+        existsSync:    jest.fn().mockImplementation(realFs.existsSync),
+        mkdirSync:     jest.fn(),
+        writeFileSync: jest.fn(),
+    };
+});
 import { TrainService } from '@core/domain/training/services/TrainService';
 import { VocabularyService } from '@core/domain/training/services/VocabularyService';
 import { ITreinamentoRepository } from '@core/ports/out/ITreinamentoRepository';
+import { IVagaRepository } from '@core/ports/out/IVagaRepository';
 import { TrainingRow } from '@core/domain/training/TrainingRow';
+import { Vaga } from '@core/domain/Vaga';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -32,19 +49,42 @@ const makeRepository = (): jest.Mocked<ITreinamentoRepository> => ({
     getRawTrainingData: jest.fn(),
 });
 
+const makeVagaRepository = (): jest.Mocked<IVagaRepository> => ({
+    findAll: jest.fn(),
+    findById: jest.fn(),
+    updateEmbeddings: jest.fn(),
+});
+
+const makeVaga = (overrides: Partial<Vaga> = {}): Vaga => ({
+    id: 'vaga-001',
+    titulo: 'Desenvolvedor Backend',
+    empresa: 'TechCorp',
+    estado: 'SP',
+    regime: 'CLT',
+    nivelSenioridade: 'pleno',
+    salarioMin: 8000,
+    salarioMax: 12000,
+    publicadaEm: new Date('2026-01-10T00:00:00.000Z'),
+    encerradaEm: null,
+    habilidades: ['Node.js', 'TypeScript'],
+    ...overrides,
+});
+
 // ---------------------------------------------------------------------------
 // Suite
 // ---------------------------------------------------------------------------
 
 describe('TrainService', () => {
     let repository: jest.Mocked<ITreinamentoRepository>;
+    let vagaRepository: jest.Mocked<IVagaRepository>;
     let vocabularyService: VocabularyService;
     let service: TrainService;
 
     beforeEach(() => {
         repository = makeRepository();
+        vagaRepository = makeVagaRepository();
         vocabularyService = new VocabularyService();
-        service = new TrainService(repository, vocabularyService);
+        service = new TrainService(repository, vocabularyService, vagaRepository);
     });
 
     // -----------------------------------------------------------------------
@@ -691,25 +731,21 @@ describe('TrainService', () => {
             it('user_skills_input tem shape [null, 20] — sequência de 20 tokens', () => {
                 model = service.buildModel(100, 3);
 
-                const layer = model.getLayer('user_skills_input');
-                expect(layer).toBeDefined();
-                // inputs[0] corresponde à ordem declarada em tf.model({ inputs: [...] })
+                expect(model.getLayer('user_skills_input')).toBeDefined();
                 expect(model.inputs[0].shape).toEqual([null, 20]);
             });
 
             it('job_skills_input tem shape [null, 20] — sequência de 20 tokens da vaga', () => {
                 model = service.buildModel(100, 3);
 
-                const layer = model.getLayer('job_skills_input');
-                expect(layer).toBeDefined();
+                expect(model.getLayer('job_skills_input')).toBeDefined();
                 expect(model.inputs[1].shape).toEqual([null, 20]);
             });
 
             it('numeric_input tem shape [null, 1 + seniorityCount] — experiência + one-hot', () => {
                 model = service.buildModel(100, 3);
 
-                const layer = model.getLayer('numeric_input');
-                expect(layer).toBeDefined();
+                expect(model.getLayer('numeric_input')).toBeDefined();
                 // 1 (experiência normalizada) + 3 (one-hot) = shape [null, 4]
                 expect(model.inputs[2].shape).toEqual([null, 4]);
             });
@@ -725,7 +761,7 @@ describe('TrainService', () => {
             });
 
             it('numeric_input com seniorityCount=0 gera shape [null, 1] — apenas experiência', () => {
-                // Documenta comportamento de borda: sem senioridades, só experiência entra
+                // Documenta comportamento de borda: sem senioridades, só experiência
                 model = service.buildModel(100, 0);
 
                 expect(model.inputs[2].shape).toEqual([null, 1]);
@@ -749,17 +785,14 @@ describe('TrainService', () => {
             it('camada hiring_probability usa ativação sigmoid — crítico para saída em [0, 1]', () => {
                 model = service.buildModel(100, 3);
 
-                const config = layerConfig('hiring_probability');
-                // TF.js serializa a ativação como objeto { className } ou como string
-                const activation = JSON.stringify(config['activation']).toLowerCase();
+                const activation = JSON.stringify(layerConfig('hiring_probability')['activation']).toLowerCase();
                 expect(activation).toContain('sigmoid');
             });
 
             it('camada de saída produz 1 unidade', () => {
                 model = service.buildModel(100, 3);
 
-                const config = layerConfig('hiring_probability');
-                expect(config['units']).toBe(1);
+                expect(layerConfig('hiring_probability')['units']).toBe(1);
             });
         });
 
@@ -830,14 +863,14 @@ describe('TrainService', () => {
             it('camadas densas intermediárias usam ativação relu — aprendizado não-linear', () => {
                 model = service.buildModel(100, 3);
 
-                const denseLayers = model.layers.filter(l => l.getClassName() === 'Dense');
-                // As duas primeiras Dense são relu; a última (hiring_probability) é sigmoid
-                const hiddenDense = denseLayers.filter(l => l.name !== 'hiring_probability');
+                const hiddenDense = model.layers
+                    .filter(l => l.getClassName() === 'Dense' && l.name !== 'hiring_probability');
                 expect(hiddenDense).toHaveLength(2);
 
                 hiddenDense.forEach(layer => {
-                    const config = layer.getConfig() as Record<string, any>;
-                    const activation = JSON.stringify(config['activation']).toLowerCase();
+                    const activation = JSON.stringify(
+                        (layer.getConfig() as Record<string, any>)['activation']
+                    ).toLowerCase();
                     expect(activation).toContain('relu');
                 });
             });
@@ -845,12 +878,12 @@ describe('TrainService', () => {
             it('camadas densas têm units 32 e 16 respectivamente', () => {
                 model = service.buildModel(100, 3);
 
-                const denseLayers = model.layers
+                const units = model.layers
                     .filter(l => l.getClassName() === 'Dense' && l.name !== 'hiring_probability')
                     .map(l => (l.getConfig() as Record<string, any>)['units'])
-                    .sort((a, b) => b - a); // ordena decrescente
+                    .sort((a, b) => b - a);
 
-                expect(denseLayers).toEqual([32, 16]);
+                expect(units).toEqual([32, 16]);
             });
         });
 
@@ -873,7 +906,6 @@ describe('TrainService', () => {
             it('métricas incluem accuracy para monitoramento do treino', () => {
                 model = service.buildModel(100, 3);
 
-                // metricsNames sempre inclui 'loss'; accuracy aparece como 'acc' ou 'accuracy'
                 const metrics = model.metricsNames.map(m => m.toLowerCase());
                 const hasAccuracy = metrics.some(m => m.includes('acc'));
                 expect(hasAccuracy).toBe(true);
@@ -888,17 +920,349 @@ describe('TrainService', () => {
 
                 expect(modelA.inputs[2].shape).toEqual([null, 3]); // 1 + 2
                 expect(modelB.inputs[2].shape).toEqual([null, 6]); // 1 + 5
-
-                expect(
-                    (modelA.getLayer('skill_embedding').getConfig() as any)['inputDim']
-                ).toBe(100);
-                expect(
-                    (modelB.getLayer('skill_embedding').getConfig() as any)['inputDim']
-                ).toBe(300);
+                expect((modelA.getLayer('skill_embedding').getConfig() as any)['inputDim']).toBe(100);
+                expect((modelB.getLayer('skill_embedding').getConfig() as any)['inputDim']).toBe(300);
 
                 modelA.dispose();
-                model = modelB; // afterEach vai dispor modelB
+                model = modelB; // afterEach dispose modelB
             });
+        });
+    });
+
+    // -----------------------------------------------------------------------
+    describe('prepareSingleJobTensor()', () => {
+
+        // Dados de treino usados para popular metadata e vocabulário
+        const trainingRows = [
+            makeRow(2, 'junior', ['Node.js', 'TypeScript'], ['AWS', 'Docker']),
+            makeRow(8, 'senior', ['Python', 'Django'],      ['GCP', 'Kubernetes']),
+        ];
+
+        const tensors: tf.Tensor[] = [];
+        const track = <T extends tf.Tensor>(t: T): T => { tensors.push(t); return t; };
+
+        beforeEach(() => {
+            vocabularyService.build(trainingRows);
+            service.extractMetadata(trainingRows);
+        });
+
+        afterEach(() => {
+            while (tensors.length) tensors.pop()!.dispose();
+        });
+
+        it('lança erro quando extractMetadata não foi chamado antes', () => {
+            // Instância nova sem metadata extraída
+            const freshService = new TrainService(repository, new VocabularyService(), vagaRepository);
+
+            expect(() => freshService.prepareSingleJobTensor(makeVaga()))
+                .toThrow('Metadata não extraída. Execute extractMetadata() antes.');
+        });
+
+        it('retorna skills tensor com shape [1, 20] — sequência de tokens da vaga', () => {
+            const { skills, numeric } = service.prepareSingleJobTensor(makeVaga());
+            track(skills); track(numeric);
+
+            expect(skills.shape).toEqual([1, 20]);
+        });
+
+        it('retorna numeric tensor com shape [1, 1 + n_senioridades]', () => {
+            // 2 senioridades no training set (junior, senior) → shape [1, 3]
+            const { skills, numeric } = service.prepareSingleJobTensor(makeVaga());
+            track(skills); track(numeric);
+
+            expect(numeric.shape).toEqual([1, 3]); // 1 experiência + 2 one-hot
+        });
+
+        it('normalizedExperience é sempre 0 no índice 0 do tensor numeric (vagas não têm anos)', () => {
+            const { skills, numeric } = service.prepareSingleJobTensor(makeVaga());
+            track(skills); track(numeric);
+
+            const numericArr = (numeric.arraySync() as number[][])[0];
+            expect(numericArr[0]).toBe(0); // placeholder de experiência
+        });
+
+        it('one-hot encoding: seniority conhecida ativa a posição correta', () => {
+            // seniorityList = ['junior', 'senior'] (ordem de inserção)
+            const vagaJunior = makeVaga({ nivelSenioridade: 'junior' });
+            const vagaSenior = makeVaga({ nivelSenioridade: 'senior' });
+
+            const resJunior = service.prepareSingleJobTensor(vagaJunior);
+            const resSenior = service.prepareSingleJobTensor(vagaSenior);
+            track(resJunior.skills); track(resJunior.numeric);
+            track(resSenior.skills); track(resSenior.numeric);
+
+            const numericJunior = (resJunior.numeric.arraySync() as number[][])[0];
+            const numericSenior = (resSenior.numeric.arraySync() as number[][])[0];
+
+            // junior é idx 0 da lista → posição 1 do tensor (após a experiência)
+            expect(numericJunior[1]).toBe(1); // junior ativado
+            expect(numericJunior[2]).toBe(0); // senior desativado
+
+            // senior é idx 1 da lista
+            expect(numericSenior[1]).toBe(0); // junior desativado
+            expect(numericSenior[2]).toBe(1); // senior ativado
+        });
+
+        it('seniority desconhecida (não vista no treino) → one-hot all zeros, sem erro', () => {
+            // Cobre o ramo `if (seniorityIndex >= 0)` quando seniorityIndex = -1
+            const vagaDesconhecida = makeVaga({ nivelSenioridade: 'especialista' });
+
+            const { skills, numeric } = service.prepareSingleJobTensor(vagaDesconhecida);
+            track(skills); track(numeric);
+
+            const numericArr = (numeric.arraySync() as number[][])[0];
+            const oneHotPart = numericArr.slice(1); // ignora o placeholder de experiência
+            expect(oneHotPart.every(v => v === 0)).toBe(true);
+        });
+
+        it('skills da vaga são tokenizadas pelo vocabulário', () => {
+            const vaga = makeVaga({ habilidades: ['Node.js', 'TypeScript'] });
+            const { skills } = service.prepareSingleJobTensor(vaga);
+            track(skills);
+
+            const skillsArr = (skills.arraySync() as number[][])[0];
+            // As 2 primeiras posições devem ter tokens ≥ 1 (skills conhecidas)
+            expect(skillsArr[0]).toBeGreaterThanOrEqual(1);
+            expect(skillsArr[1]).toBeGreaterThanOrEqual(1);
+        });
+
+        it('habilidades undefined → all padding zeros no tensor de skills', () => {
+            const vaga = makeVaga({ habilidades: undefined });
+            const { skills } = service.prepareSingleJobTensor(vaga);
+            track(skills);
+
+            const skillsArr = (skills.arraySync() as number[][])[0];
+            expect(skillsArr.every(v => v === 0)).toBe(true);
+        });
+
+        it('habilidades vazia → all padding zeros no tensor de skills', () => {
+            const vaga = makeVaga({ habilidades: [] });
+            const { skills } = service.prepareSingleJobTensor(vaga);
+            track(skills);
+
+            const skillsArr = (skills.arraySync() as number[][])[0];
+            expect(skillsArr.every(v => v === 0)).toBe(true);
+        });
+    });
+
+    // -----------------------------------------------------------------------
+    describe('syncDatabaseEmbeddings()', () => {
+
+        let model: tf.LayersModel;
+
+        // Dataset mínimo com 2 senioridades para a rede ter entradas válidas
+        const trainingRows = [
+            makeRow(2, 'junior', ['Node.js'], ['AWS']),
+            makeRow(8, 'senior', ['Python'], ['GCP']),
+        ];
+
+        beforeEach(() => {
+            vocabularyService.build(trainingRows);
+            service.extractMetadata(trainingRows);
+            model = service.buildModel(vocabularyService.size(), 2);
+            vagaRepository.updateEmbeddings.mockResolvedValue(undefined);
+        });
+
+        afterEach(() => { model?.dispose(); });
+
+        it('chama vagaRepository.findAll() para buscar as vagas ativas', async () => {
+            vagaRepository.findAll.mockResolvedValue([]);
+
+            await service.syncDatabaseEmbeddings(model);
+
+            expect(vagaRepository.findAll).toHaveBeenCalledTimes(1);
+        });
+
+        it('não chama updateEmbeddings quando não há vagas ativas', async () => {
+            vagaRepository.findAll.mockResolvedValue([]);
+
+            await service.syncDatabaseEmbeddings(model);
+
+            expect(vagaRepository.updateEmbeddings).not.toHaveBeenCalled();
+        });
+
+        it('chama updateEmbeddings uma vez para cada vaga ativa', async () => {
+            vagaRepository.findAll.mockResolvedValue([
+                makeVaga({ id: 'vaga-1', nivelSenioridade: 'junior' }),
+                makeVaga({ id: 'vaga-2', nivelSenioridade: 'senior' }),
+                makeVaga({ id: 'vaga-3', nivelSenioridade: 'junior' }),
+            ]);
+
+            await service.syncDatabaseEmbeddings(model);
+
+            expect(vagaRepository.updateEmbeddings).toHaveBeenCalledTimes(3);
+        });
+
+        it('passa o id correto de cada vaga para updateEmbeddings', async () => {
+            vagaRepository.findAll.mockResolvedValue([
+                makeVaga({ id: 'vaga-abc', nivelSenioridade: 'junior' }),
+                makeVaga({ id: 'vaga-xyz', nivelSenioridade: 'senior' }),
+            ]);
+
+            await service.syncDatabaseEmbeddings(model);
+
+            expect(vagaRepository.updateEmbeddings).toHaveBeenCalledWith('vaga-abc', expect.any(Array));
+            expect(vagaRepository.updateEmbeddings).toHaveBeenCalledWith('vaga-xyz', expect.any(Array));
+        });
+
+        it('passa um array de números como embeddings — vetor de saída da feature_projection_layer', async () => {
+            vagaRepository.findAll.mockResolvedValue([
+                makeVaga({ id: 'vaga-1', nivelSenioridade: 'junior' }),
+            ]);
+
+            await service.syncDatabaseEmbeddings(model);
+
+            const [, embeddings] = vagaRepository.updateEmbeddings.mock.calls[0];
+            expect(Array.isArray(embeddings)).toBe(true);
+            expect(embeddings.length).toBeGreaterThan(0);
+            expect(embeddings.every((v: any) => typeof v === 'number')).toBe(true);
+        });
+
+        it('embeddings têm dimensão igual ao número de unidades da feature_projection_layer (32)', async () => {
+            vagaRepository.findAll.mockResolvedValue([
+                makeVaga({ id: 'vaga-1', nivelSenioridade: 'pleno' }),
+            ]);
+            // 'pleno' não está na lista de treino → one-hot all zeros, mas não deve lançar erro
+
+            await service.syncDatabaseEmbeddings(model);
+
+            const [, embeddings] = vagaRepository.updateEmbeddings.mock.calls[0];
+            expect(embeddings).toHaveLength(32);
+        });
+    });
+
+    // -----------------------------------------------------------------------
+    describe('runTraining()', () => {
+
+        const trainingRows = [
+            makeRow(2, 'junior', ['Node.js', 'TypeScript'], ['AWS', 'Docker']),
+            makeRow(8, 'senior', ['Python'],                ['GCP']),
+        ];
+
+        // Mock model que simula fit/save sem executar treino real
+        const makeMockModel = () => ({
+            fit:     jest.fn().mockResolvedValue({}),
+            save:    jest.fn().mockResolvedValue({}),
+            dispose: jest.fn(),
+        });
+
+        beforeEach(() => {
+            repository.getRawTrainingData.mockResolvedValue(trainingRows);
+            (fs.existsSync   as jest.Mock).mockReturnValue(false);
+            (fs.mkdirSync    as jest.Mock).mockReturnValue(undefined);
+            (fs.writeFileSync as jest.Mock).mockReturnValue(undefined);
+            jest.spyOn(service, 'buildModel').mockReturnValue(makeMockModel() as any);
+            jest.spyOn(service, 'syncDatabaseEmbeddings').mockResolvedValue(undefined);
+        });
+
+        afterEach(() => {
+            jest.restoreAllMocks();
+            // Restaura o pass-through do existsSync para não quebrar outros testes
+            (fs.existsSync as jest.Mock).mockImplementation(
+                jest.requireActual<typeof import('fs')>('fs').existsSync
+            );
+            (fs.mkdirSync    as jest.Mock).mockReset();
+            (fs.writeFileSync as jest.Mock).mockReset();
+        });
+
+        it('busca os dados de treinamento via getRawTrainingData', async () => {
+            await service.runTraining();
+
+            expect(repository.getRawTrainingData).toHaveBeenCalledTimes(1);
+        });
+
+        it('constrói o vocabulário com os dados retornados pelo banco', async () => {
+            const buildSpy = jest.spyOn(vocabularyService, 'build');
+
+            await service.runTraining();
+
+            expect(buildSpy).toHaveBeenCalledTimes(1);
+            expect(buildSpy).toHaveBeenCalledWith(trainingRows);
+        });
+
+        it('constrói o modelo com vocabularySize e seniorityCount derivados dos dados', async () => {
+            await service.runTraining();
+
+            // 2 senioridades (junior, senior) no dataset
+            expect(service.buildModel).toHaveBeenCalledWith(
+                expect.any(Number),
+                2
+            );
+        });
+
+        it('cria o diretório model-data quando ainda não existe', async () => {
+            (fs.existsSync as jest.Mock).mockReturnValue(false);
+
+            await service.runTraining();
+
+            expect(fs.mkdirSync).toHaveBeenCalledWith('./model-data');
+        });
+
+        it('não tenta criar o diretório quando ele já existe', async () => {
+            (fs.existsSync as jest.Mock).mockReturnValue(true);
+
+            await service.runTraining();
+
+            expect(fs.mkdirSync).not.toHaveBeenCalled();
+        });
+
+        it('salva metadata.json com seniorityList, vocabSize e mapeamento do vocabulário', async () => {
+            await service.runTraining();
+
+            expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
+            const [path, content] = (fs.writeFileSync as jest.Mock).mock.calls[0];
+            expect(path).toBe('./model-data/metadata.json');
+
+            const parsed = JSON.parse(content as string);
+            expect(parsed).toHaveProperty('seniorityList');
+            expect(parsed).toHaveProperty('vocabSize');
+            expect(parsed).toHaveProperty('vocab');
+            expect(Array.isArray(parsed.seniorityList)).toBe(true);
+        });
+
+        it('chama model.save com o caminho correto', async () => {
+            const mockModel = makeMockModel();
+            (service.buildModel as jest.Mock).mockReturnValue(mockModel);
+
+            await service.runTraining();
+
+            expect(mockModel.save).toHaveBeenCalledWith('file://./model-data');
+        });
+
+        it('chama syncDatabaseEmbeddings com o modelo treinado', async () => {
+            const mockModel = makeMockModel();
+            (service.buildModel as jest.Mock).mockReturnValue(mockModel);
+
+            await service.runTraining();
+
+            expect(service.syncDatabaseEmbeddings).toHaveBeenCalledWith(mockModel);
+        });
+
+        it('propaga erro quando getRawTrainingData falha', async () => {
+            repository.getRawTrainingData.mockRejectedValue(new Error('DB connection refused'));
+
+            await expect(service.runTraining()).rejects.toThrow('DB connection refused');
+        });
+
+        it('loga progresso apenas nas épocas múltiplas de 10 via onEpochEnd', async () => {
+            const mockModel = makeMockModel();
+            (service.buildModel as jest.Mock).mockReturnValue(mockModel);
+
+            await service.runTraining();
+
+            // Captura o callback passado para model.fit e o invoca diretamente
+            const fitCall = (mockModel.fit as jest.Mock).mock.calls[0];
+            const { onEpochEnd } = fitCall[2].callbacks;
+
+            const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+
+            onEpochEnd(0,  { loss: 0.5, accuracy: 0.8  }); // múltiplo de 10 → loga
+            onEpochEnd(5,  { loss: 0.4, accuracy: 0.85 }); // não múltiplo → silencioso
+            onEpochEnd(10, { loss: 0.3, accuracy: 0.9  }); // múltiplo de 10 → loga
+            onEpochEnd(15, { loss: 0.2, accuracy: 0.95 }); // não múltiplo → silencioso
+
+            expect(consoleSpy).toHaveBeenCalledTimes(2);
+            consoleSpy.mockRestore();
         });
     });
 });

@@ -9,4 +9,5 @@ export interface Vaga {
     salarioMax: number | null;
     publicadaEm: Date;
     encerradaEm: Date | null;
+    habilidades?: string[]; // skills da vaga — populadas via JOIN com habilidades_vaga
 }
