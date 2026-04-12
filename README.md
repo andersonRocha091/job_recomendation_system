@@ -1,6 +1,6 @@
-# E-commerce Recommendation System
+# Job Recommendation System
 
-A web application that displays user profiles and product listings, with the ability to track user purchases for future machine learning recommendations using TensorFlow.js.
+A web application that displays according to users skills and seniority, the best oppenings fitting to its profile and considering the likelyhood of hiring  with the ability to track users applications for future machine learning recommendations using TensorFlow.js.
 
 ## Project Structure
 
