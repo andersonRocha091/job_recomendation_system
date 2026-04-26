@@ -1,4 +1,5 @@
 import { ITreinamentoRepository } from "@core/ports/out/ITreinamentoRepository";
+import { ITreinamentoService } from "@core/ports/in/ITreinamentoService";
 import { VocabularyService } from "./VocabularyService";
 import { TrainingRow } from "../TrainingRow";
 import * as fs from 'fs';
@@ -14,7 +15,7 @@ export interface TrainingMetaData {
     vocabSize: number;
 }
 
-export class TrainService {
+export class TrainService implements ITreinamentoService {
 
     private metadata: TrainingMetaData | null = null;
     private readonly FEATURE_PROJECTION_LAYER = 'feature_projection_layer';
@@ -105,17 +106,20 @@ export class TrainService {
         //2. Camada de Embedding
         // inputDim: tamanho do vocabulario
         // outputDim: cada skill vira um vetor de 16 dimensões (hiperparâmetro)
+        // maskZero: true + GlobalAveragePooling1D: o pooling suporta e propaga a máscara,
+        // fazendo a média apenas sobre os tokens reais e ignorando o padding (índice 0)
         const skillEmbedding = tf.layers.embedding({
             inputDim: vocabularySize,
             outputDim: 16,
-            maskZero: true, // importante para ignorar o padding (0)
+            maskZero: true,
             name: 'skill_embedding'
         })
 
         // 3. Processamento das "torres"
-        // Aplicando o embedding nas entradas de skills e depois flatten para virar vetor plano
-        const userFeatures = tf.layers.flatten().apply(skillEmbedding.apply(userSkillsInput)) as tf.SymbolicTensor;
-        const jobFeatures = tf.layers.flatten().apply(skillEmbedding.apply(jobSkillsInput)) as tf.SymbolicTensor;
+        // GlobalAveragePooling1D faz a média dos embeddings dos tokens reais (ignorando padding)
+        // e produz um vetor fixo de 16 dimensões — substitui Flatten que não suporta máscaras
+        const userFeatures = tf.layers.globalAveragePooling1d().apply(skillEmbedding.apply(userSkillsInput)) as tf.SymbolicTensor;
+        const jobFeatures = tf.layers.globalAveragePooling1d().apply(skillEmbedding.apply(jobSkillsInput)) as tf.SymbolicTensor;
 
         // 4. Concatenando todas as features (skills + numericas)
         // juntamos os vetores de skills do usuário e da vaga com as features numéricas (experiência + senioridade)
@@ -151,10 +155,18 @@ export class TrainService {
 
     }
 
+    async executarTreinamento(): Promise<void> {
+        return this.runTraining();
+    }
+
     async runTraining() {
         console.log('Iniciando processo de treinamento...');
         // 1. extracao e preparacao dos dados do banco
         const rows = await this.treinamentoRepository.getRawTrainingData();
+
+        if (rows.length === 0) {
+            throw new Error('Nenhum dado de treinamento encontrado. Verifique se há usuários, vagas e candidaturas no banco.');
+        }
         this.vocabularyService.build(rows);
         const { xInputs, yLabels, metaData } = await this.prepareTensor(rows);
         const seniorityCount = metaData.seniorityList.length;
@@ -177,7 +189,8 @@ export class TrainService {
             callbacks: {
                 onEpochEnd: (epochs, logs) => {
                     if (epochs % 10 === 0) {
-                        console.log(`Epoch ${epochs}: Loss: ${logs?.loss.toFixed(4)}, Accuracy: ${logs?.accuracy.toFixed(4)}`);
+                        // TF.js abrevia 'accuracy' como 'acc' nos logs do fit
+                        console.log(`Epoch ${epochs}: Loss: ${logs?.loss?.toFixed(4)}, Accuracy: ${logs?.acc?.toFixed(4)}`);
                     }
                 }
             }

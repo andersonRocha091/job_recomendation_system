@@ -255,32 +255,32 @@ describe('TrainService', () => {
 
         // -------------------------------------------------------------------
         describe('vocabSize — integração com VocabularyService', () => {
-            it('retorna vocabSize=0 quando o vocabulário ainda não foi construído', () => {
+            it('retorna vocabSize=1 quando o vocabulário ainda não foi construído (apenas padding)', () => {
                 const { vocabSize } = service.extractMetadata([makeRow(3, 'pleno')]);
 
-                expect(vocabSize).toBe(0);
+                expect(vocabSize).toBe(1); // 0 skills + 1 padding → inputDim mínimo
             });
 
             it('reflete o tamanho do vocabulário após o build do VocabularyService', () => {
                 vocabularyService.build([
                     makeRow(3, 'pleno', ['Node.js', 'TypeScript'], ['Node.js', 'AWS']),
                 ]);
-                // Node.js(dup), TypeScript, AWS → 3 skills únicas
+                // Node.js(dup), TypeScript, AWS → 3 skills únicas → inputDim = 3 + 1 = 4
                 const { vocabSize } = service.extractMetadata([makeRow(3, 'pleno')]);
 
-                expect(vocabSize).toBe(3);
+                expect(vocabSize).toBe(4);
             });
 
             it('reflete atualização do vocabulário entre chamadas successivas de extractMetadata', () => {
                 const row = makeRow(3, 'pleno', ['Python'], ['FastAPI']);
 
                 const before = service.extractMetadata([row]);
-                expect(before.vocabSize).toBe(0);
+                expect(before.vocabSize).toBe(1); // vocabulário vazio → só padding
 
                 vocabularyService.build([row]);
 
                 const after = service.extractMetadata([row]);
-                expect(after.vocabSize).toBe(2); // Python, FastAPI
+                expect(after.vocabSize).toBe(3); // Python, FastAPI → 2 únicas + 1 padding = 3
             });
         });
 
@@ -839,11 +839,11 @@ describe('TrainService', () => {
 
         // -------------------------------------------------------------------
         describe('topologia da rede', () => {
-            it('possui exatamente 2 camadas Flatten — uma para user skills, outra para job skills', () => {
+            it('possui exatamente 2 camadas GlobalAveragePooling1D — uma para user skills, outra para job skills', () => {
                 model = service.buildModel(100, 3);
 
-                const flattenLayers = model.layers.filter(l => l.getClassName() === 'Flatten');
-                expect(flattenLayers).toHaveLength(2);
+                const gapLayers = model.layers.filter(l => l.getClassName() === 'GlobalAveragePooling1D');
+                expect(gapLayers).toHaveLength(2);
             });
 
             it('possui uma camada Concatenate que une os três fluxos de features', () => {
@@ -1244,6 +1244,12 @@ describe('TrainService', () => {
             await expect(service.runTraining()).rejects.toThrow('DB connection refused');
         });
 
+        it('lança erro descritivo quando não há dados de treinamento', async () => {
+            repository.getRawTrainingData.mockResolvedValue([]);
+
+            await expect(service.runTraining()).rejects.toThrow('Nenhum dado de treinamento encontrado');
+        });
+
         it('loga progresso apenas nas épocas múltiplas de 10 via onEpochEnd', async () => {
             const mockModel = makeMockModel();
             (service.buildModel as jest.Mock).mockReturnValue(mockModel);
@@ -1256,10 +1262,11 @@ describe('TrainService', () => {
 
             const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
 
-            onEpochEnd(0,  { loss: 0.5, accuracy: 0.8  }); // múltiplo de 10 → loga
-            onEpochEnd(5,  { loss: 0.4, accuracy: 0.85 }); // não múltiplo → silencioso
-            onEpochEnd(10, { loss: 0.3, accuracy: 0.9  }); // múltiplo de 10 → loga
-            onEpochEnd(15, { loss: 0.2, accuracy: 0.95 }); // não múltiplo → silencioso
+            // TF.js abrevia 'accuracy' como 'acc' nos logs do fit
+            onEpochEnd(0,  { loss: 0.5, acc: 0.8  }); // múltiplo de 10 → loga
+            onEpochEnd(5,  { loss: 0.4, acc: 0.85 }); // não múltiplo → silencioso
+            onEpochEnd(10, { loss: 0.3, acc: 0.9  }); // múltiplo de 10 → loga
+            onEpochEnd(15, { loss: 0.2, acc: 0.95 }); // não múltiplo → silencioso
 
             expect(consoleSpy).toHaveBeenCalledTimes(2);
             consoleSpy.mockRestore();

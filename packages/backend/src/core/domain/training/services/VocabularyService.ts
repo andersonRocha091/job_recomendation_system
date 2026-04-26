@@ -4,6 +4,7 @@ export class VocabularyService {
     private vocabulary: Map<string, number> = new Map();
 
     build(rows: TrainingRow[]) {
+        this.vocabulary.clear(); // garante vocabulário limpo a cada build (evita contaminação entre retreinamentos)
         const allSkills = new Set<string>();
         rows.forEach(row => {
             row.skillsUsuario.forEach((skill: string) => allSkills.add(skill));
@@ -24,6 +25,8 @@ export class VocabularyService {
     }
 
     size(): number {
-        return this.vocabulary.size;
+        // +1 para incluir o token de padding (índice 0), garantindo que inputDim do embedding
+        // cubra todos os índices possíveis: 0 (padding) até vocabulary.size (último skill)
+        return this.vocabulary.size + 1;
     }
 }

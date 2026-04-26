@@ -18,16 +18,18 @@ describe('VocabularyService', () => {
 
     // -------------------------------------------------------------------------
     describe('size()', () => {
-        it('retorna 0 antes de qualquer build', () => {
-            expect(service.size()).toBe(0);
+        it('retorna 1 antes de qualquer build (apenas o token de padding)', () => {
+            // 0 skills únicas + 1 (padding) = 1 — o mínimo para o inputDim do embedding
+            expect(service.size()).toBe(1);
         });
 
-        it('retorna o total de skills únicas após o build', () => {
+        it('retorna total de skills únicas + 1 (padding) após o build', () => {
             service.build([
                 makeRow(['Node.js', 'TypeScript'], ['Node.js', 'AWS']),
             ]);
-            // Node.js (duplicado), TypeScript, AWS → 3 únicas
-            expect(service.size()).toBe(3);
+            // Node.js (duplicado), TypeScript, AWS → 3 únicas → inputDim = 3 + 1 = 4
+            // índices atribuídos: 1, 2, 3 — embedding precisa cobrir [0, 3]
+            expect(service.size()).toBe(4);
         });
     });
 
@@ -43,8 +45,8 @@ describe('VocabularyService', () => {
         it('desduplicação: mesma skill em skillsUsuario e skillsVaga conta uma só vez', () => {
             service.build([makeRow(['React'], ['React', 'Redux'])]);
 
-            // React (dup) + Redux → 2 únicas
-            expect(service.size()).toBe(2);
+            // React (dup) + Redux → 2 únicas → inputDim = 2 + 1 = 3
+            expect(service.size()).toBe(3);
         });
 
         it('desduplicação: mesma skill em linhas diferentes conta uma só vez', () => {
@@ -52,8 +54,8 @@ describe('VocabularyService', () => {
                 makeRow(['Java'], ['Spring Boot']),
                 makeRow(['Java'], ['Kubernetes']),
             ]);
-            // Java (dup), Spring Boot, Kubernetes → 3 únicas
-            expect(service.size()).toBe(3);
+            // Java (dup), Spring Boot, Kubernetes → 3 únicas → inputDim = 3 + 1 = 4
+            expect(service.size()).toBe(4);
         });
 
         it('constrói vocabulário completo a partir de múltiplas linhas de treinamento', () => {
@@ -62,35 +64,31 @@ describe('VocabularyService', () => {
                 makeRow(['Python', 'Django'],       ['Python', 'FastAPI']),
             ];
             service.build(rows);
-            // Node.js(dup), TypeScript, AWS, Docker, Python(dup), Django, FastAPI → 7 únicas
-            expect(service.size()).toBe(7);
+            // Node.js(dup), TypeScript, AWS, Docker, Python(dup), Django, FastAPI → 7 únicas → inputDim = 8
+            expect(service.size()).toBe(8);
         });
 
         it('aceita linhas com arrays de skills vazios sem erros', () => {
             expect(() => service.build([makeRow([], [])])).not.toThrow();
-            expect(service.size()).toBe(0);
+            expect(service.size()).toBe(1); // 0 skills + 1 padding
         });
 
         it('aceita array de linhas vazio sem erros', () => {
             expect(() => service.build([])).not.toThrow();
-            expect(service.size()).toBe(0);
+            expect(service.size()).toBe(1); // 0 skills + 1 padding
         });
 
-        it('acumula o vocabulário entre chamadas sucessivas de build (comportamento atual)', () => {
-            // ATENÇÃO: build() não reinicia o vocabulário entre chamadas — ele acumula.
-            // Em cenários de retreinamento do modelo, é necessário instanciar um novo
-            // VocabularyService ou adicionar um método reset() para evitar contaminação
-            // de dados entre sessões de treinamento distintas.
+        it('reinicia o vocabulário a cada build (sem acumulação entre retreinamentos)', () => {
             service.build([makeRow(['Java'], ['Spring'])]);
-            expect(service.size()).toBe(2);
+            expect(service.size()).toBe(3); // 2 únicas + 1 padding
 
             service.build([makeRow(['Go'], ['gRPC', 'Protobuf'])]);
-            // Java e Spring do primeiro build permanecem → 2 + 3 = 5
-            expect(service.size()).toBe(5);
+            // build limpa o vocabulário anterior: apenas Go, gRPC, Protobuf → 3 únicas + 1 = 4
+            expect(service.size()).toBe(4);
 
-            // Skills do primeiro build ainda são reconhecidas
+            // Skills do primeiro build NÃO são mais reconhecidas após o segundo build
             const tokens = service.tokenize(['Java'], 1);
-            expect(tokens[0]).toBeGreaterThanOrEqual(1);
+            expect(tokens[0]).toBe(0); // Java virou desconhecida
         });
     });
 
