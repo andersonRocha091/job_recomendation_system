@@ -6,6 +6,7 @@ import * as fs from 'fs';
 
 import * as tf from '@tensorflow/tfjs-node';
 import { IVagaRepository } from "@core/ports/out/IVagaRepository";
+import { IModelStore } from "@core/ports/out/IModelStore";
 import { Vaga } from "@core/domain/Vaga";
 
 export interface TrainingMetaData {
@@ -15,14 +16,17 @@ export interface TrainingMetaData {
     vocabSize: number;
 }
 
+export const FEATURE_PROJECTION_LAYER = 'feature_projection_layer';
+
 export class TrainService implements ITreinamentoService {
 
     private metadata: TrainingMetaData | null = null;
-    private readonly FEATURE_PROJECTION_LAYER = 'feature_projection_layer';
+    private readonly FEATURE_PROJECTION_LAYER = FEATURE_PROJECTION_LAYER;
     constructor(
         private readonly treinamentoRepository: ITreinamentoRepository,
         private readonly vocabularyService: VocabularyService,
         private readonly vagaRepository: IVagaRepository,
+        private readonly modelStore: IModelStore,
     ) {}
 
     extractMetadata(rows: TrainingRow[]): TrainingMetaData {
@@ -75,11 +79,20 @@ export class TrainService implements ITreinamentoService {
            const seniorityIndex = seniorityList.indexOf(row.nivelSenioridade.toLowerCase());
            oneHotSeniority[seniorityIndex] = 1;
 
+           // 4. skill overlap: fração das skills da vaga que o usuário possui (recall)
+           //    e fração das skills do usuário que a vaga exige (coverage)
+           const userSkillsSet = new Set(row.skillsUsuario.map(s => s.toLowerCase()));
+           const matchCount = row.skillsVaga.filter(s => userSkillsSet.has(s.toLowerCase())).length;
+           const skillRecall   = matchCount / Math.max(row.skillsVaga.length, 1);
+           const skillCoverage = matchCount / Math.max(row.skillsUsuario.length, 1);
+
            return [
             ...userSkillsTokens, // 0 to 19 indexes
             normalizedExperience, // 20th index
             ...jobSkillsTokens, // 21 to 40 indexes
-            ...oneHotSeniority // 41 to 40 + n indexes
+            ...oneHotSeniority, // 41 to 40 + n indexes
+            skillRecall,   // 41 + n
+            skillCoverage  // 42 + n
            ]
         });
 
@@ -100,8 +113,8 @@ export class TrainService implements ITreinamentoService {
         const userSkillsInput = tf.input({ shape: [20], name: 'user_skills_input' });
         // 2. entrada de skills da vaga (20 inteiros)
         const jobSkillsInput = tf.input({ shape: [20], name: 'job_skills_input' });
-        // 3. entrada numerica: 1 (experiencia normalizada) + N (One-hot senioridade)
-        const numericInput = tf.input({ shape: [1 + seniorityCount], name: 'numeric_input' });
+        // 3. entrada numerica: 1 (experiencia normalizada) + N (One-hot senioridade) + 2 (skill overlap)
+        const numericInput = tf.input({ shape: [1 + seniorityCount + 2], name: 'numeric_input' });
 
         //2. Camada de Embedding
         // inputDim: tamanho do vocabulario
@@ -177,24 +190,33 @@ export class TrainService implements ITreinamentoService {
         // fatiamento das features para alimentar as entradas separadas do modelo
         const userSkills = xInputs.slice([0, 0], [-1, 20]);
         const jobSkills = xInputs.slice([0, 21], [-1, 20]);
+        // numericData: experiência (idx 20) + one-hot seniority (41..40+n) + overlap features (2)
         const nummericData = xInputs.slice([0, 20], [-1, 1])
-        .concat(xInputs.slice([0,41], [-1, seniorityCount]), 1);
+        .concat(xInputs.slice([0, 41], [-1, seniorityCount + 2]), 1);
+
+        // Peso de classe: compensa o desequilíbrio entre pares contratado (minoria)
+        // e não-contratado (maioria). Sem isso, o gradiente dos negativos domina e
+        // o modelo colapsa para a taxa base (ex.: ~11% para tudo).
+        const positiveCount = rows.filter(r => r.contratado === 1).length;
+        const negativeCount = rows.length - positiveCount;
+        const classWeight = { 0: 1.0, 1: negativeCount / positiveCount };
+        console.log(`Distribuição: ${positiveCount} positivos / ${negativeCount} negativos — class weight positivo: ${classWeight[1].toFixed(2)}x`);
 
         console.log('Iniciando treinamento do modelo...');
         await model.fit([userSkills, jobSkills, nummericData], yLabels, {
-            epochs: 30,
-            batchSize: 64,
+            epochs: 100,
+            batchSize: 16,  // batches menores = mais atualizações de gradiente por epoch
             validationSplit: 0.1,
             shuffle: true,
+            classWeight,
             callbacks: {
-                onEpochEnd: (epochs, logs) => {
-                    if (epochs % 10 === 0) {
+                onEpochEnd: (epoch, logs) => {
+                    if (epoch % 20 === 0) {
                         // TF.js abrevia 'accuracy' como 'acc' nos logs do fit
-                        console.log(`Epoch ${epochs}: Loss: ${logs?.loss?.toFixed(4)}, Accuracy: ${logs?.acc?.toFixed(4)}`);
+                        console.log(`Epoch ${epoch}: Loss: ${logs?.loss?.toFixed(4)}, Acc: ${logs?.acc?.toFixed(4)} | Val Loss: ${logs?.val_loss?.toFixed(4)}, Val Acc: ${logs?.val_acc?.toFixed(4)}`);
                     }
                 }
             }
-
         })
 
         // 3. Persistencia do modelo treinado (exemplo: salvando localmente, mas poderia ser em um bucket, banco, etc)
@@ -212,12 +234,16 @@ export class TrainService implements ITreinamentoService {
         ));
         console.log('Sincronizando embeddings com o banco de dados...');
         await this.syncDatabaseEmbeddings(model);
-        
-        console.log('✅ Treinamento concluído com sucesso!');
 
-        // Cleanup de tensores e modelo da memória
+        // Transfere a propriedade do modelo para o store — não dispor aqui
+        this.modelStore.update({
+            model,
+            vocabulary: this.vocabularyService,
+            metadata: this.metadata!,
+        });
+
         tf.dispose([xInputs, yLabels, userSkills, jobSkills, nummericData]);
-        model.dispose(); // Bug 3: libera os pesos do modelo após uso
+        console.log('✅ Treinamento concluído com sucesso!');
     }
 
     async syncDatabaseEmbeddings(model: tf.LayersModel) {
@@ -264,9 +290,10 @@ export class TrainService implements ITreinamentoService {
         const seniorityIndex = this.metadata.seniorityList.indexOf(vaga.nivelSenioridade.toLowerCase());
         if (seniorityIndex >= 0) oneHotSeniority[seniorityIndex] = 1;
 
+        // overlap features são 0 no contexto de embedding isolado da vaga (sem usuário de referência)
         return {
             skills: tf.tensor2d([jobSkillsTokens],[1, MAX_SKILLS]),
-            numeric: tf.tensor2d([[normalizedExperience, ...oneHotSeniority]],[1, 1 + this.metadata.seniorityList.length])
+            numeric: tf.tensor2d([[normalizedExperience, ...oneHotSeniority, 0, 0]],[1, 1 + this.metadata.seniorityList.length + 2])
         }
     }
 }

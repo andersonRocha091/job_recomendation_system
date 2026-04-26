@@ -9,7 +9,8 @@ export class Server {
         this.app = new App();
     }
 
-    public start(): void {
+    public async start(): Promise<void> {
+        await this.app.initialize();
         this.app.getApp().listen(this.port, () => {
             console.log(`Backend running on http://localhost:${this.port}`);
         });

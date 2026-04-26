@@ -1,5 +1,5 @@
 import { Pool } from 'pg';
-import { IVagaRepository } from '../../../core/ports/out/IVagaRepository';
+import { IVagaRepository, VagaSimilar } from '../../../core/ports/out/IVagaRepository';
 import { Vaga } from '../../../core/domain/Vaga';
 
 export class VagaRepositoryImpl implements IVagaRepository {
@@ -60,5 +60,32 @@ export class VagaRepositoryImpl implements IVagaRepository {
             SET emb_vaga = $1
             WHERE id = $2
         `, [vectorLiteral, id]);
+    }
+
+    async findByEmbeddingSimilarity(embedding: number[], limit: number): Promise<VagaSimilar[]> {
+        const vectorLiteral = `[${embedding.join(',')}]`;
+        const { rows } = await this.pool.query<VagaSimilar>(`
+            SELECT
+                v.id,
+                v.titulo,
+                v.empresa,
+                v.estado,
+                v.regime,
+                v.nivel_senioridade                                                         AS "nivelSenioridade",
+                v.salario_min                                                               AS "salarioMin",
+                v.salario_max                                                               AS "salarioMax",
+                v.publicada_em                                                              AS "publicadaEm",
+                v.encerrada_em                                                              AS "encerradaEm",
+                COALESCE(array_agg(DISTINCT hv.habilidade) FILTER (WHERE hv.habilidade IS NOT NULL), '{}') AS habilidades,
+                1 - (v.emb_vaga <=> $1::vector)                                            AS similaridade
+            FROM vagas v
+            LEFT JOIN habilidades_vaga hv ON hv.vaga_id = v.id
+            WHERE v.encerrada_em IS NULL
+              AND v.emb_vaga IS NOT NULL
+            GROUP BY v.id
+            ORDER BY similaridade DESC
+            LIMIT $2
+        `, [vectorLiteral, limit]);
+        return rows;
     }
 }

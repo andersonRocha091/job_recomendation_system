@@ -119,6 +119,8 @@ dist
 # Firebase cache directory
 .firebase/
 
+.model-data/
+
 # TernJS port file
 .tern-port
 

@@ -1,3 +1,3 @@
 import { Server } from './Server';
 
-new Server().start();
+new Server().start().catch(console.error);

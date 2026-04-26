@@ -6,4 +6,5 @@ export interface Usuario {
     estado: string | null;
     anosExperiencia: number | null;
     criadoEm: Date;
+    habilidades?: string[];
 }

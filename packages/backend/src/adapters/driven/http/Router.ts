@@ -2,6 +2,7 @@ import { Router as ExpressRouter, Request, Response } from 'express';
 import { VagaController } from './controllers/VagaController';
 import { UsuarioController } from './controllers/UsuarioController';
 import { TreinamentoController } from './controllers/TreinamentoController';
+import { RecomendacaoController } from './controllers/RecomendacaoController';
 
 export class Router {
     private readonly router: ExpressRouter;
@@ -10,6 +11,7 @@ export class Router {
         private readonly vagaController: VagaController,
         private readonly usuarioController: UsuarioController,
         private readonly treinamentoController: TreinamentoController,
+        private readonly recomendacaoController: RecomendacaoController,
     ) {
         this.router = ExpressRouter();
         this.registerRoutes();
@@ -25,6 +27,8 @@ export class Router {
         this.router.get('/usuarios/:id', (req, res) => this.usuarioController.buscarPorId(req, res));
 
         this.router.post('/treinamento', (req, res) => this.treinamentoController.executar(req, res));
+
+        this.router.get('/recomendacoes/:usuarioId', (req, res) => this.recomendacaoController.recomendar(req, res));
     }
 
     public getRouter(): ExpressRouter {

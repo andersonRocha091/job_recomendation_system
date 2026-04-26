@@ -24,6 +24,10 @@ export class VocabularyService {
         return [...tokens, ...new Array(maxLength - tokens.length).fill(0)];
     }
 
+    restore(entries: [string, number][]): void {
+        this.vocabulary = new Map(entries);
+    }
+
     size(): number {
         // +1 para incluir o token de padding (índice 0), garantindo que inputDim do embedding
         // cubra todos os índices possíveis: 0 (padding) até vocabulary.size (último skill)
